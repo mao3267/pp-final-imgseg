@@ -19,12 +19,51 @@ import evaluate
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
-from utils.palette import create_ade20k_label_colormap
+from utils.palette import ade_palette
 import requests
+import json
+from huggingface_hub import cached_download, hf_hub_url
 
 pippy.fx.Tracer.proxy_buffer_attributes = True
 
 gigabyte_size = 1024**3
+
+metric = evaluate.load("mean_iou")
+
+# Load label map
+repo_id = "huggingface/label-files"
+filename = "ade20k-id2label.json"
+id2label = json.load(
+    open(cached_download(hf_hub_url(repo_id, filename, repo_type="dataset")), "r")
+)
+id2label = {int(k): v for k, v in id2label.items()}
+label2id = {v: k for k, v in id2label.items()}
+num_labels = len(id2label)
+
+
+def compute_metrics(eval_pred):
+    with torch.no_grad():
+        logits, labels = eval_pred
+        logits_tensor = torch.from_numpy(logits)
+        logits_tensor = nn.functional.interpolate(
+            logits_tensor,
+            size=labels.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).argmax(dim=1)
+
+        pred_labels = logits_tensor.detach().cpu().numpy()
+        metrics = metric.compute(
+            predictions=pred_labels,
+            references=labels,
+            num_labels=num_labels,
+            ignore_index=255,
+            reduce_labels=False,
+        )
+        for key, value in metrics.items():
+            if isinstance(value, np.ndarray):
+                metrics[key] = value.tolist()
+        return metrics
 
 
 def format_to_gb(item, precision=4):
@@ -91,19 +130,18 @@ def run_all(pp_ranks, args):
     inject_pipeline_forward(model, pipe_driver)
 
     # Generate Image semantic segmentation results
-    # ds = load_dataset("", split="test[:10]")
+    ds = load_dataset("scene_parse_150", split="test[:10]")
 
     # Load feature extractor
-    image_processor = AutoImageProcessor.from_pretrained(args.model_name)
+    image_processor = AutoImageProcessor.from_pretrained(
+        args.model_name, reduce_labels=True
+    )
 
     # Load image
-    # image = ds[6]["image"]
-    url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/segmentation_input.jpg"
-    image = Image.open(requests.get(url, stream=True).raw)
+    image = ds[6]["image"]
+    # url = "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/transformers/tasks/segmentation_input.jpg"
+    # image = Image.open(requests.get(url, stream=True).raw)
     # print image
-    plt.figure(figsize=(15, 10))
-    plt.imshow(image)
-    plt.show()
 
     encoding = image_processor(image, return_tensors="pt")
     pixel_values = encoding.pixel_values.to("cpu")
@@ -122,7 +160,7 @@ def run_all(pp_ranks, args):
     pred_seg = upsampled_logits.argmax(dim=1)[0]
 
     color_seg = np.zeros((pred_seg.shape[0], pred_seg.shape[1], 3), dtype=np.uint8)
-    palette = np.array(create_ade20k_label_colormap())
+    palette = np.array(ade_palette())
     for label, color in enumerate(palette):
         color_seg[pred_seg == label, :] = color
     color_seg = color_seg[..., ::-1]  # convert to BGR
