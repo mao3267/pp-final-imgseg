@@ -1,1 +1,5 @@
+datasets==2.16.0
 evaluate==0.4.1
+torch==2.1.2
+matplotlib==3.8.2
+transformers==4.36.2
