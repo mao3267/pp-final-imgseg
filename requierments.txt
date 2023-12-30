@@ -1,1 +1,6 @@
+torch==1.13.0
+transformers==4.36.2
+gluoncv==0.10.5
 evaluate==0.4.1
+mxnet==1.6.0
+timm==0.9.12
