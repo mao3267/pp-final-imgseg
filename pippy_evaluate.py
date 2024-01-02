@@ -24,6 +24,13 @@ import json
 from huggingface_hub import cached_download, hf_hub_url
 import time
 
+from measure_latency import measure_latency
+import warnings
+
+warnings.filterwarnings('ignore', message='.*is deprecated.*')
+# Suppress all warnings
+warnings.filterwarnings('ignore')
+
 pippy.fx.Tracer.proxy_buffer_attributes = True
 
 gigabyte_size = 1024**3
@@ -39,7 +46,7 @@ id2label = json.load(
 id2label = {int(k): v for k, v in id2label.items()}
 label2id = {v: k for k, v in id2label.items()}
 num_labels = len(id2label)
-
+pippy_latency = 0.0
 
 def format_to_gb(item, precision=4):
     """quick function to format numbers to gigabyte and round to (default) 4 digit precision"""
@@ -199,6 +206,10 @@ def run_all(pp_ranks, args):
 
     print(f"mean_iou = {mean_iou / (len(ds) // 2)}")
     print(f"mean_time = {mean_time / (len(ds) // 2)}")
+    global pippy_latency
+    pippy_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME="Segformer on PiPPy")
+
+
 
 
 if __name__ == "__main__":
@@ -263,7 +274,18 @@ if __name__ == "__main__":
     model = SegformerForSemanticSegmentation.from_pretrained(
         args.model_name, id2label=id2label, label2id=label2id
     )
+    if args.rank == 0:
+        model_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME=args.model_name)
 
     args.model = model
     args.gspmd = 1
     run_pippy(run_all, args)
+
+    if args.rank != 0:
+        exit()
+
+    print(f"--- Latency(sec) ---")
+    print("pippy latency = ", pippy_latency)
+    print("model latency = ", model_latency)
+    print(f"speedup = {model_latency / pippy_latency:.2f}")
+

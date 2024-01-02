@@ -1,3 +1,5 @@
 ./PiPPy/*
 .DS_Store
+.vscode
 __pycache__
+pp-final-env
