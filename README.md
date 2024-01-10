@@ -18,3 +18,7 @@ torchrun --nproc_per_node 8 pippy_evaluate.py
 ```
 
 Current Model: `nvidia/segformer-b1-finetuned-cityscapes-1024-1024`
+
+## Usage of cityscape dataset
+1. unzip the gtFine_trainvaltest.zip file
+2. only use aachen city now for simplicity

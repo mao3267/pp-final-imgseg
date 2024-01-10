@@ -20,12 +20,14 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 from utils.palette import ade_palette
+# from utils.cityscapes_utils import CityscapesLabelEncoder, CityscapesTrainDataset, CityscapesTestDataset, CityscapesDataset
 import json
 from huggingface_hub import cached_download, hf_hub_url
 import time
 
 from measure_latency import measure_latency
 import warnings
+from torchvision.datasets import Cityscapes
 
 warnings.filterwarnings('ignore', message='.*is deprecated.*')
 # Suppress all warnings
@@ -47,6 +49,7 @@ id2label = {int(k): v for k, v in id2label.items()}
 label2id = {v: k for k, v in id2label.items()}
 num_labels = len(id2label)
 pippy_latency = 0.0
+image_to_process = 2
 
 def format_to_gb(item, precision=4):
     """quick function to format numbers to gigabyte and round to (default) 4 digit precision"""
@@ -98,6 +101,7 @@ def run_all(pp_ranks, args):
         index_filename=args.index_filename,
         # checkpoint_prefix=args.checkpoint_prefix,
     )
+    
 
     params = get_number_of_params(stage_mod)
     print(f"submod_{args.rank} {params // 10 ** 6}M params")
@@ -111,10 +115,6 @@ def run_all(pp_ranks, args):
     # Inject pipeline driver's forward function back to original model to support HF's `generate()` method
     inject_pipeline_forward(model, pipe_driver)
 
-    # Generate Image semantic segmentation results
-    ds = load_dataset("hf-internal-testing/fixtures_ade20k", split="test")
-
-    # Load feature extractor
     image_processor = SegformerImageProcessor.from_pretrained(
         args.model_name, reduce_labels=False
     )
@@ -127,10 +127,40 @@ def run_all(pp_ranks, args):
     mean_iou = 0.0
 
     mean_time = 0.0
-    for i in range(0, len(ds), 2):
-        image = Image.open(ds[i]["file"])
-        segmentation_map = Image.open(ds[i + 1]["file"])
+    city_name = "aachen"
+    city_dir = os.path.join("dataset", city_name)
+    files = os.listdir(city_dir)
 
+    color_image_dir = os.path.join("dataset/gtFine_trainvaltest/gtFine/train", city_name)
+    color_files = os.listdir(color_image_dir)
+
+    # Filter out the relevant files for images and labels
+    image_files = [f for f in files if f.endswith('_leftImg8bit.png')]
+    label_files = [f for f in color_files if f.endswith('_gtFine_labelIds.png')]
+
+    # Sort the files to ensure matching pairs are aligned
+    image_files.sort()
+    label_files.sort()
+
+    # Iterate over each image and label pair
+    count = 0
+    for img_file, lbl_file in zip(image_files, label_files):
+        # Construct the full file paths
+        image_path = os.path.join(city_dir, img_file)
+        label_path = os.path.join(color_image_dir, lbl_file)
+        img_prefix = img_file.split('_leftImg8bit.png')[0]
+        lbl_prefix = lbl_file.split('_gtFine_labelIds.png')[0]
+
+        # Check if the prefixes are the same
+        if img_prefix != lbl_prefix:
+            print(f"Error: Mismatched image and label pair: {img_file}, {lbl_file}")
+            continue
+        # Load the image and label
+        image = Image.open(image_path)
+        image = image.convert("RGB")
+        label = Image.open(label_path)
+        segmentation_map = label.convert("L")
+        
         pixel_values = feature_extractor(image, return_tensors="pt").pixel_values.to(
             args.device
         )
@@ -164,7 +194,7 @@ def run_all(pp_ranks, args):
 
         plt.figure(figsize=(15, 10))
         plt.imshow(img)
-        # plt.show()
+        plt.show()
 
         ground_truth_seg = np.array(
             segmentation_map
@@ -182,7 +212,7 @@ def run_all(pp_ranks, args):
 
         plt.figure(figsize=(15, 10))
         plt.imshow(img)
-        # plt.show()
+        plt.show()
 
         pred_labels = logits.detach().cpu().numpy().argmax(axis=1)[0]
 
@@ -204,10 +234,14 @@ def run_all(pp_ranks, args):
         # print(metrics)
         mean_iou += metrics["mean_iou"]
 
-    print(f"mean_iou = {mean_iou / (len(ds) // 2)}")
-    print(f"mean_time = {mean_time / (len(ds) // 2)}")
+        count += 1
+        if count == image_to_process:
+            break
+
+    print(f"mean_iou = {mean_iou / image_to_process // 2}")
+    print(f"mean_time = {mean_time / ( image_to_process // 2)}")
     global pippy_latency
-    pippy_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME="Segformer on PiPPy")
+    # pippy_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME="Segformer on PiPPy")
 
 
 
@@ -274,8 +308,8 @@ if __name__ == "__main__":
     model = SegformerForSemanticSegmentation.from_pretrained(
         args.model_name, id2label=id2label, label2id=label2id
     )
-    if args.rank == 0:
-        model_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME=args.model_name)
+    # if args.rank == 0:
+        # model_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME=args.model_name)
 
     args.model = model
     args.gspmd = 1
@@ -284,8 +318,8 @@ if __name__ == "__main__":
     if args.rank != 0:
         exit()
 
-    print(f"--- Latency(sec) ---")
-    print("pippy latency = ", pippy_latency)
-    print("model latency = ", model_latency)
-    print(f"speedup = {model_latency / pippy_latency:.2f}")
+    # print(f"--- Latency(sec) ---")
+    # print("pippy latency = ", pippy_latency)
+    # print("model latency = ", model_latency)
+    # print(f"speedup = {model_latency / pippy_latency:.2f}")
 
