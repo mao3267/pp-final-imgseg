@@ -16,6 +16,8 @@ pip install -r requirements.txt
 
 ## Run
 
+Baseline Model: `nvidia/segformer-b1-finetuned-cityscapes-1024-1024`
+
 ### Run Segformer with PiPPy
 
 ```
@@ -23,8 +25,6 @@ python3 hf_generate.py
 # measure latency
 torchrun --nproc_per_node 8 pippy_evaluate.py
 ```
-
-Current Model: `nvidia/segformer-b1-finetuned-cityscapes-1024-1024`
 
 ### Slicing Images
 
@@ -54,8 +54,8 @@ python3 multi_images_handling/test_multiprocessing.py
 
 ## Usage of cityscape dataset
 
-1. unzip the gtFine_trainvaltest.zip file
-2. only use aachen city now for simplicity
+1. Download and unzip the gtFine_trainvaltest.zip and leftImg8bit_trainvaltest.zip from cityscapes official websites
+2. Use Validation set from cityscapes dataset
 
 ## Parallel GPU inference
 
