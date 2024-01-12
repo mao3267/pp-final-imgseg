@@ -14,24 +14,28 @@ from transformers import (
     SegformerFeatureExtractor,
 )
 from PIL import Image
-from datasets import load_dataset
+
+# from datasets import load_dataset
 import evaluate
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
 from utils.palette import ade_palette
+
 # from utils.cityscapes_utils import CityscapesLabelEncoder, CityscapesTrainDataset, CityscapesTestDataset, CityscapesDataset
 import json
 from huggingface_hub import cached_download, hf_hub_url
 import time
 
-from measure_latency import measure_latency
+# from measure_latency import measure_latency
 import warnings
 from torchvision.datasets import Cityscapes
+from pathlib import Path
+from utils.cityscapes_id import trainId2label
 
-warnings.filterwarnings('ignore', message='.*is deprecated.*')
+warnings.filterwarnings("ignore", message=".*is deprecated.*")
 # Suppress all warnings
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
 pippy.fx.Tracer.proxy_buffer_attributes = True
 
@@ -41,15 +45,17 @@ metric = evaluate.load("mean_iou")
 
 # Load label map
 repo_id = "huggingface/label-files"
-filename = "ade20k-id2label.json"
+filename = "cityscapes-id2label.json"
 id2label = json.load(
     open(cached_download(hf_hub_url(repo_id, filename, repo_type="dataset")), "r")
 )
 id2label = {int(k): v for k, v in id2label.items()}
 label2id = {v: k for k, v in id2label.items()}
 num_labels = len(id2label)
+print(f"num_labels = {num_labels}")
 pippy_latency = 0.0
-image_to_process = 2
+image_to_process = 10
+
 
 def format_to_gb(item, precision=4):
     """quick function to format numbers to gigabyte and round to (default) 4 digit precision"""
@@ -73,6 +79,8 @@ def get_number_of_params(model):
 
 def run_all(pp_ranks, args):
     model = args.model
+    print(f"device: {args.device}")
+    model.to(torch.device(args.device))
     model.eval()
     model.config.use_cache = False  # don't output `past_key_values`
     num_ranks = len(pp_ranks)
@@ -101,7 +109,6 @@ def run_all(pp_ranks, args):
         index_filename=args.index_filename,
         # checkpoint_prefix=args.checkpoint_prefix,
     )
-    
 
     params = get_number_of_params(stage_mod)
     print(f"submod_{args.rank} {params // 10 ** 6}M params")
@@ -122,21 +129,29 @@ def run_all(pp_ranks, args):
         args.model_name, reduce_labels=False
     )
 
-    model.eval()
-
     mean_iou = 0.0
 
     mean_time = 0.0
-    city_name = "aachen"
-    city_dir = os.path.join("dataset", city_name)
-    files = os.listdir(city_dir)
 
-    color_image_dir = os.path.join("dataset/gtFine_trainvaltest/gtFine/train", city_name)
-    color_files = os.listdir(color_image_dir)
+    # Dataset structure: ./dataset -> leftImg8bit_trainvaltest/gtFine_trainvaltest
+    city_dir = Path("dataset/leftImg8bit/val")
+    files = city_dir.rglob("*_leftImg8bit.png")
+
+    color_image_dir = Path("dataset/gtFine/val")
+    color_files = color_image_dir.rglob("*_gtFine_labelIds.png")
+
+    # city_name = "aachen"
+    # city_dir = os.path.join("dataset/leftImg8bit_trainvaltest/leftImg8bit/", city_name)
+    # files = os.listdir(city_dir)
+
+    # color_image_dir = os.path.join(
+    #     "dataset/gtFine_trainvaltest/gtFine/train", city_name
+    # )
+    # color_files = os.listdir(color_image_dir)
 
     # Filter out the relevant files for images and labels
-    image_files = [f for f in files if f.endswith('_leftImg8bit.png')]
-    label_files = [f for f in color_files if f.endswith('_gtFine_labelIds.png')]
+    image_files = [str(f) for f in files]  # if f.endswith("_leftImg8bit.png")
+    label_files = [str(f) for f in color_files]  # if f.endswith("_gtFine_labelIds.png")
 
     # Sort the files to ensure matching pairs are aligned
     image_files.sort()
@@ -144,23 +159,20 @@ def run_all(pp_ranks, args):
 
     # Iterate over each image and label pair
     count = 0
-    for img_file, lbl_file in zip(image_files, label_files):
+    for img_path, label_path in zip(image_files, label_files):
         # Construct the full file paths
-        image_path = os.path.join(city_dir, img_file)
-        label_path = os.path.join(color_image_dir, lbl_file)
-        img_prefix = img_file.split('_leftImg8bit.png')[0]
-        lbl_prefix = lbl_file.split('_gtFine_labelIds.png')[0]
 
         # Check if the prefixes are the same
-        if img_prefix != lbl_prefix:
-            print(f"Error: Mismatched image and label pair: {img_file}, {lbl_file}")
-            continue
+        # if img_prefix != lbl_prefix:
+        #     print(f"Error: Mismatched image and label pair: {img_file}, {lbl_file}")
+        #     continue
         # Load the image and label
-        image = Image.open(image_path)
+        image = Image.open(img_path)
         image = image.convert("RGB")
         label = Image.open(label_path)
-        segmentation_map = label.convert("L")
-        
+        # segmentation_map = label.convert("L")
+        segmentation_map = np.array(label)
+
         pixel_values = feature_extractor(image, return_tensors="pt").pixel_values.to(
             args.device
         )
@@ -182,6 +194,7 @@ def run_all(pp_ranks, args):
         color_seg = np.zeros(
             (seg.shape[0], seg.shape[1], 3), dtype=np.uint8
         )  # height, width, 3
+
         palette = np.array(ade_palette())
         for label, color in enumerate(palette):
             color_seg[seg == label, :] = color
@@ -191,36 +204,50 @@ def run_all(pp_ranks, args):
         # Show image + mask
         img = np.array(image) * 0.5 + color_seg * 0.5
         img = img.astype(np.uint8)
+        image = Image.fromarray(img)
+        image.save("results.jpg")
+        # plt.figure(figsize=(15, 10))
+        # plt.imshow(img)
+        # plt.show()
 
-        plt.figure(figsize=(15, 10))
-        plt.imshow(img)
-        plt.show()
+        # ground_truth_seg = np.array(
+        #     segmentation_map
+        # )  # 2D ground truth segmentation map
+        # ground_truth_color_seg = np.zeros(
+        #     (ground_truth_seg.shape[0], ground_truth_seg.shape[1], 3), dtype=np.uint8
+        # )  # height, width, 3
+        # for label, color in enumerate(palette):
+        #     ground_truth_color_seg[ground_truth_seg - 1 == label, :] = color
+        # # Convert to BGR
+        # ground_truth_color_seg = ground_truth_color_seg[..., ::-1]
 
-        ground_truth_seg = np.array(
-            segmentation_map
-        )  # 2D ground truth segmentation map
-        ground_truth_color_seg = np.zeros(
-            (ground_truth_seg.shape[0], ground_truth_seg.shape[1], 3), dtype=np.uint8
-        )  # height, width, 3
-        for label, color in enumerate(palette):
-            ground_truth_color_seg[ground_truth_seg - 1 == label, :] = color
-        # Convert to BGR
-        ground_truth_color_seg = ground_truth_color_seg[..., ::-1]
+        # img = np.array(image) * 0.5 + ground_truth_color_seg * 0.5
+        # img = img.astype(np.uint8)
 
-        img = np.array(image) * 0.5 + ground_truth_color_seg * 0.5
-        img = img.astype(np.uint8)
-
-        plt.figure(figsize=(15, 10))
-        plt.imshow(img)
-        plt.show()
+        # plt.figure(figsize=(15, 10))
+        # plt.imshow(img)
+        # plt.show()
 
         pred_labels = logits.detach().cpu().numpy().argmax(axis=1)[0]
 
+        # Convert trainId to labelId
+        for i in range(pred_labels.shape[0]):
+            for j in range(pred_labels.shape[1]):
+                pred_labels[i][j] = trainId2label[pred_labels[i][j]][1]
+        # with open("pred_labels.txt", "w") as f:
+        #     for i in range(pred_labels.shape[0]):
+        #         for j in range(pred_labels.shape[1]):
+        #             f.write(str(pred_labels[i][j]) + " ")
+        #         f.write("\n")
+        # with open("labels.txt", "w") as f:
+        #     for i in range(labels.shape[0]):
+        #         for j in range(labels.shape[1]):
+        #             f.write(str(labels[i][j]) + " ")
+        #         f.write("\n")
         # Compute metrics
+
         metrics = metric.compute(
-            predictions=[
-                pred_labels + 1
-            ],  # add 1 to match the label ids in ground truth
+            predictions=[pred_labels],  # add 1 to match the label ids in ground truth
             references=[labels],
             num_labels=num_labels,
             ignore_index=255,
@@ -233,17 +260,16 @@ def run_all(pp_ranks, args):
 
         # print(metrics)
         mean_iou += metrics["mean_iou"]
-
+        print(f"iou: {metrics['mean_iou']}")
         count += 1
         if count == image_to_process:
             break
 
-    print(f"mean_iou = {mean_iou / image_to_process // 2}")
-    print(f"mean_time = {mean_time / ( image_to_process // 2)}")
+    print(f"mean_iou = {mean_iou / count }")
+    print(f"mean_time = {mean_time / count }")
+    print(f"all time = {mean_time}")
     global pippy_latency
     # pippy_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME="Segformer on PiPPy")
-
-
 
 
 if __name__ == "__main__":
@@ -261,13 +287,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_name",
         type=str,
-        default="nvidia/segformer-b5-finetuned-ade-640-640",
+        default="nvidia/segformer-b0-finetuned-cityscapes-1024-1024",
     )
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--chunks", type=int, default=1)
     parser.add_argument("--cuda", type=int, default=int(torch.cuda.is_available()))
     parser.add_argument(
-        "--pp_group_size", type=int, default=int(os.getenv("WORLD_SIZE", 1))
+        "--pp_group_size", type=int, default=int(os.getenv("WORLD_SIZE", 4))
     )
     parser.add_argument(
         "--dtype", type=str, default="fp32", choices=["fp32", "bf16", "fp16"]
@@ -309,7 +335,7 @@ if __name__ == "__main__":
         args.model_name, id2label=id2label, label2id=label2id
     )
     # if args.rank == 0:
-        # model_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME=args.model_name)
+    # model_latency = measure_latency(model=model, measure_times=10, num_threads=1, MODEL_NAME=args.model_name)
 
     args.model = model
     args.gspmd = 1
@@ -322,4 +348,3 @@ if __name__ == "__main__":
     # print("pippy latency = ", pippy_latency)
     # print("model latency = ", model_latency)
     # print(f"speedup = {model_latency / pippy_latency:.2f}")
-
